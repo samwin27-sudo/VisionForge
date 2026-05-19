@@ -1,0 +1,23 @@
+{
+  "project_name": "VisionForge Sample Project",
+  "dataset_path": "sample_dataset",
+  "created_at": "2026-05-19T00:00:00+00:00",
+  "updated_at": "2026-05-19T00:00:00+00:00",
+  "classes": [
+    {
+      "id": 0,
+      "name": "Vehicle",
+      "color": "#00E5FF"
+    },
+    {
+      "id": 1,
+      "name": "Pedestrian",
+      "color": "#FFB300"
+    }
+  ],
+  "class_groups": {},
+  "images": [],
+  "settings": {},
+  "split_info": {},
+  "augmentation_info": {}
+}

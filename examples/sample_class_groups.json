@@ -1,0 +1,8 @@
+{
+  "Vehicle": ["car", "bus", "truck"],
+  "Bike": ["motorcycle", "bicycle"],
+  "Pedestrian": ["person", "pedestrian"],
+  "Road Damage": ["pothole"],
+  "Road Feature": ["speedbreaker"],
+  "Road Signage": ["traffic_light", "traffic_sign"]
+}

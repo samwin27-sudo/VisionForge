@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.DS_Store
+visionforge_project.json
+exports/
+reports/
+augmented_dataset/
+dataset_split/
+randomized_dataset/
+*.pt
+*.pth
+*.onnx
+*.tflite
+*.engine

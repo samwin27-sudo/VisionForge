@@ -1,0 +1,10 @@
+car
+bus
+truck
+motorcycle
+bicycle
+person
+pothole
+speedbreaker
+traffic_light
+traffic_sign
