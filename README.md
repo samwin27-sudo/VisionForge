@@ -3,7 +3,7 @@
 **Version:** v1.0.0  
 **Tagline:** Offline-first AI-assisted annotation, segmentation, and dataset intelligence tool for Edge AI, ADAS, and computer vision datasets.
 
-![Screenshot placeholder](docs/screenshots.md)
+![VisionForge main window](docs/images/visionforge-main-window.png)
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](#installation)
 [![PySide6](https://img.shields.io/badge/UI-PySide6-green)](#installation)
