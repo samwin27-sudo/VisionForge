@@ -1,7 +1,7 @@
 from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QKeySequence, QShortcut
-from PySide6.QtWidgets import QFileDialog, QLabel, QMainWindow, QMessageBox, QProgressDialog, QPushButton, QListWidget, QSplitter, QToolBar, QVBoxLayout, QWidget, QDialog
+from PySide6.QtWidgets import QFileDialog, QLabel, QMainWindow, QMessageBox, QProgressDialog, QPushButton, QListWidget, QSplitter, QToolBar, QVBoxLayout, QWidget, QDialog, QDialog
 from visionforge.ai.ai_review import accept_all, reject_all, set_status
 from visionforge.ai.yolo_autolabeler import MissingYoloDependency, YoloAutoLabeler
 from visionforge.analysis.dataset_analyzer import analyze_project
@@ -33,7 +33,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} v{VERSION}")
-        self.resize(1400, 850)
+        self.resize(1450, 900)
         self.store = AnnotationStore()
         self.current_image_index = -1
         self.current_class_name = "object"
@@ -47,6 +47,7 @@ class MainWindow(QMainWindow):
         self.dataset_panel = DatasetPanel()
         self.class_panel = ClassPanel()
         self.class_panel.classAdded.connect(self.add_class)
+        self.class_panel.classDeleted.connect(self.delete_class)
         self.class_panel.classSelected.connect(lambda n: setattr(self, "current_class_name", n or "object"))
         self.class_panel.groupingRequested.connect(self.open_group_manager)
         left = QWidget()
@@ -57,6 +58,8 @@ class MainWindow(QMainWindow):
         self.canvas = AnnotationCanvas()
         self.canvas.annotationCreated.connect(self.add_bbox_annotation)
         self.canvas.annotationSelected.connect(self._annotation_selected)
+        self.canvas.annotationChanged.connect(self.update_bbox_annotation)
+        self.canvas.deleteSelected.connect(self.delete_annotation_by_id)
         self.dataset_panel.imageSelected.connect(self.load_image_index)
 
         self.annotation_list = QListWidget()
@@ -101,6 +104,7 @@ class MainWindow(QMainWindow):
             ("Augment Dataset", self.augment_dataset),
             ("Split Dataset", self.split_dataset),
             ("Export", self.export_dataset),
+            ("Quick Export", self.quick_export_dataset),
             ("Generate Report", self.generate_report),
             ("Settings", self.open_settings),
         ]
@@ -114,6 +118,7 @@ class MainWindow(QMainWindow):
             ("Ctrl+O", self.open_dataset),
             ("Ctrl+S", self.save_project),
             ("Ctrl+E", self.export_dataset),
+            ("Ctrl+Shift+E", self.quick_export_dataset),
             ("Ctrl+R", self.generate_report),
             ("Ctrl+A", self.auto_label_current),
             ("Ctrl+Shift+A", self.auto_label_full_dataset),
@@ -122,6 +127,7 @@ class MainWindow(QMainWindow):
             ("A", self.previous_image),
             ("D", self.next_image),
             ("Delete", self.delete_selected_annotation),
+            ("Backspace", self.delete_selected_annotation),
             ("Space", lambda: self._set_selected_status("accepted")),
             ("X", lambda: self._set_selected_status("rejected")),
         ]
@@ -181,6 +187,61 @@ class MainWindow(QMainWindow):
         self.class_panel.set_classes([c["name"] for c in self.store.project.classes])
         self.save_project()
 
+    def delete_class(self, name):
+        if not name:
+            return
+        if len(self.store.project.classes) <= 1:
+            QMessageBox.information(self, APP_NAME, "At least one class is required.")
+            return
+
+        used_count = sum(1 for _, ann in self.store.all_annotations() if ann.class_name == name)
+        if used_count:
+            reply = QMessageBox.question(
+                self,
+                APP_NAME,
+                f"Class '{name}' is used by {used_count} annotation(s).\n\nDelete this class and remove those annotations?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+            for image in self.store.images:
+                image.annotations = [ann for ann in image.annotations if ann.class_name != name]
+        else:
+            reply = QMessageBox.question(
+                self,
+                APP_NAME,
+                f"Delete class '{name}'?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+        self.store.project.classes = [c for c in self.store.project.classes if c["name"] != name]
+        for new_id, cls in enumerate(self.store.project.classes):
+            cls["id"] = new_id
+
+        id_by_name = {c["name"]: int(c["id"]) for c in self.store.project.classes}
+        for _, ann in self.store.all_annotations():
+            if ann.class_name in id_by_name:
+                ann.class_id = id_by_name[ann.class_name]
+
+        self.store.project.class_groups = {
+            group: [cls for cls in classes if cls != name]
+            for group, classes in self.store.project.class_groups.items()
+        }
+        self.store.project.class_groups = {g: c for g, c in self.store.project.class_groups.items() if c}
+
+        self.current_class_name = self.store.project.classes[0]["name"] if self.store.project.classes else "object"
+        self.class_panel.set_classes([c["name"] for c in self.store.project.classes])
+        self.selected_annotation_id = None
+        self.canvas.selected_annotation_id = None
+        self.save_project()
+        self._refresh_annotation_list()
+        self.canvas.update()
+        self._status(f"Deleted class {name}")
+
     def add_bbox_annotation(self, bbox):
         if self.current_image_index < 0:
             return
@@ -192,6 +253,21 @@ class MainWindow(QMainWindow):
         self.save_project()
         self._refresh_annotation_list()
         self.canvas.update()
+
+    def update_bbox_annotation(self, annotation_id, bbox):
+        if self.current_image_index < 0:
+            return
+        annotation = self.store.get_annotation(self.current_image_index, annotation_id)
+        if not annotation:
+            return
+        annotation.bbox = bbox
+        annotation.status = "edited" if annotation.source != "manual" else annotation.status
+        annotation.touch()
+        self.selected_annotation_id = annotation_id
+        self.canvas.selected_annotation_id = annotation_id
+        self.save_project()
+        self._refresh_annotation_list()
+        self._status("Updated bounding box")
 
     def _annotation_selected(self, annotation_id):
         self.selected_annotation_id = annotation_id
@@ -237,10 +313,16 @@ class MainWindow(QMainWindow):
             self.canvas.update()
             self._status(f"Rejected {count} predictions")
 
+    def delete_annotation_by_id(self, annotation_id):
+        self.selected_annotation_id = annotation_id
+        self.canvas.selected_annotation_id = annotation_id
+        self.delete_selected_annotation()
+
     def delete_selected_annotation(self):
         if self.current_image_index >= 0 and self.selected_annotation_id:
             self.store.delete_annotation(self.current_image_index, self.selected_annotation_id)
             self.selected_annotation_id = None
+            self.canvas.selected_annotation_id = None
             self.save_project()
             self._refresh_annotation_list()
             self.canvas.update()
@@ -304,30 +386,96 @@ class MainWindow(QMainWindow):
         self._status("Dataset analysis complete")
 
     def export_dataset(self):
-        dialog = ExportDialog(self)
+        if not self.store.images:
+            QMessageBox.information(self, APP_NAME, "Open a dataset before exporting.")
+            return
+
+        last_options = self.store.project.settings.get("last_export", {}) if self.store.project.settings else {}
+        dialog = ExportDialog(self, last_options)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
+
         options = dialog.options()
         if not options["output"]:
+            QMessageBox.information(self, APP_NAME, "Select an output folder before exporting.")
             return
+
+        self._perform_export(options, show_success=True)
+
+    def quick_export_dataset(self):
+        if not self.store.images:
+            QMessageBox.information(self, APP_NAME, "Open a dataset before exporting.")
+            return
+
+        options = self.store.project.settings.get("last_export", {}) if self.store.project.settings else {}
+        if not options or not options.get("output") or not options.get("format"):
+            QMessageBox.information(self, APP_NAME, "No saved export settings yet. Choose Export once first.")
+            self.export_dataset()
+            return
+
+        output = options.get("output", "")
+        fmt = options.get("format", "")
+        accepted_only = options.get("accepted_only", True)
+        message = chr(10).join([
+            "Reuse last export settings?",
+            "",
+            f"Format: {fmt}",
+            f"Output: {output}",
+            f"Accepted only: {accepted_only}",
+        ])
+        reply = QMessageBox.question(
+            self,
+            APP_NAME,
+            message,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        self._perform_export(options, show_success=True)
+
+    def _perform_export(self, options, show_success=True):
         output = Path(options["output"])
         try:
             fmt = options["format"]
+            accepted_only = bool(options.get("accepted_only", True))
+
             if fmt == "YOLO TXT":
-                export_yolo(self.store.project, output / "yolo", options["accepted_only"])
+                export_yolo(self.store.project, output / "yolo", accepted_only)
             elif fmt == "Pascal VOC XML":
-                export_voc(self.store.project, output / "voc", options["accepted_only"])
+                export_voc(self.store.project, output / "voc", accepted_only)
             elif fmt == "COCO Detection JSON":
-                export_coco(self.store.project, output / "coco_detection.json", False, options["accepted_only"])
+                export_coco(self.store.project, output / "coco_detection.json", False, accepted_only)
             elif fmt == "COCO Segmentation JSON":
-                export_coco(self.store.project, output / "coco_segmentation.json", True, options["accepted_only"])
+                export_coco(self.store.project, output / "coco_segmentation.json", True, accepted_only)
             elif fmt == "CSV Summary":
-                export_csv_summary(self.store.project, output / "annotation_summary.csv", options["accepted_only"])
+                export_csv_summary(self.store.project, output / "annotation_summary.csv", accepted_only)
             elif fmt == "Grouped YOLO":
                 export_grouped(self.store.project, output, "yolo")
-            QMessageBox.information(self, APP_NAME, f"Export complete:\n{output}")
+            else:
+                QMessageBox.warning(self, APP_NAME, f"Unknown export format: {fmt}")
+                return
+
+            if options.get("remember", True):
+                self.store.project.settings["last_export"] = {
+                    "format": fmt,
+                    "output": str(output),
+                    "accepted_only": accepted_only,
+                }
+                self.save_project()
+
+            self._status(f"Exported {fmt}")
+            if show_success:
+                success = chr(10).join([
+                    "Export complete:",
+                    str(output),
+                    "",
+                    "Saved as last export settings. Use Quick Export next time.",
+                ])
+                QMessageBox.information(self, APP_NAME, success)
         except Exception as exc:
-            QMessageBox.warning(self, APP_NAME, f"Export failed.\n\n{exc}")
+            QMessageBox.warning(self, APP_NAME, "Export failed." + chr(10) + chr(10) + str(exc))
 
     def generate_report(self):
         folder = QFileDialog.getExistingDirectory(self, "Select report output folder")
