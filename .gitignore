@@ -14,3 +14,23 @@ randomized_dataset/
 *.onnx
 *.tflite
 *.engine
+
+# VisionForge local model weights and generated datasets
+models/*
+!models/.gitkeep
+!models/README.md
+*.pt
+*.pth
+*.onnx
+*.tflite
+*.pb
+*.h5
+*.weights
+*.ckpt
+*.safetensors
+*.engine
+datasets/
+outputs/
+exports/
+augmented_dataset/
+dataset_split/
