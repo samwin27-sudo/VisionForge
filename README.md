@@ -5,7 +5,7 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![PySide6](https://img.shields.io/badge/UI-PySide6-green)
 ![License](https://img.shields.io/badge/License-MIT-yellow)
-![Version](https://img.shields.io/badge/Version-v1.0.5-purple)
+![Version](https://img.shields.io/badge/Version-v1.1.0-purple)
 
 ![VisionForge main window](docs/images/visionforge-main-window.png)
 
@@ -254,6 +254,19 @@ The `.gitignore` is configured to prevent accidental commits of large model file
 ```
 
 ---
+
+
+
+## VisionForge v1.1.0 Highlights
+
+- Batch auto-annotation for the full dataset
+- Single-image auto-annotation and full-dataset auto-annotation use the same settings dialog
+- Editable COCO/ADAS class mapping, for example `Vehicle = car, truck, bus, train`
+- Optional YOLO + SAM workflow to generate segmentation polygons from detected boxes
+- Remember default YOLO and SAM models until the user changes them
+- Class-colored bounding boxes for easier review
+- More standard augmentation options: grayscale, contrast, saturation, blur, noise, sharpen, vertical flip, random crop, resize, and small-angle rotation
+
 
 ## Quick Start
 

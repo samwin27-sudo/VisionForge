@@ -1,6 +1,6 @@
 from pathlib import Path
 APP_NAME="VisionForge"
-VERSION="1.0.4"
+VERSION="1.1.0"
 TAGLINE="Offline-first AI-assisted annotation, segmentation, and dataset intelligence tool for Edge AI, ADAS, and computer vision datasets."
 PROJECT_FILE_NAME="visionforge_project.json"
 SUPPORTED_IMAGE_EXTENSIONS={".jpg",".jpeg",".png",".bmp",".webp"}

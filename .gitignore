@@ -34,3 +34,5 @@ outputs/
 exports/
 augmented_dataset/
 dataset_split/
+
+.visionforge_patch_backup/

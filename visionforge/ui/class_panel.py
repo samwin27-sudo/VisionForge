@@ -1,54 +1,59 @@
+from __future__ import annotations
+
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QLabel, QListWidget, QPushButton, QVBoxLayout, QHBoxLayout, QWidget, QInputDialog
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QListWidget, QPushButton, QVBoxLayout, QWidget
 
 
 class ClassPanel(QWidget):
     classAdded = Signal(str)
-    classDeleted = Signal(str)
     classSelected = Signal(str)
+    classDeleted = Signal(str)
     groupingRequested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.list_widget = QListWidget()
-        self.add_btn = QPushButton('Add Class')
-        self.delete_btn = QPushButton('Delete Class')
-        self.group_btn = QPushButton('Class Groups')
+        self.list = QListWidget()
+        self.input = QLineEdit()
+        self.input.setPlaceholderText("New class name")
+        add = QPushButton("Add")
+        delete = QPushButton("Delete Class")
+        groups = QPushButton("Class Groups")
 
-        lay = QVBoxLayout(self)
-        lay.addWidget(QLabel('Classes'))
-        lay.addWidget(self.list_widget)
+        add.clicked.connect(self._add)
+        delete.clicked.connect(self._delete)
+        groups.clicked.connect(self.groupingRequested.emit)
+        self.list.currentTextChanged.connect(self.classSelected.emit)
 
         row = QHBoxLayout()
-        row.addWidget(self.add_btn)
-        row.addWidget(self.delete_btn)
-        lay.addLayout(row)
-        lay.addWidget(self.group_btn)
+        row.addWidget(self.input, 1)
+        row.addWidget(add)
 
-        self.add_btn.clicked.connect(self._add)
-        self.delete_btn.clicked.connect(self._delete)
-        self.group_btn.clicked.connect(self.groupingRequested.emit)
-        self.list_widget.currentTextChanged.connect(self.classSelected.emit)
+        btns = QHBoxLayout()
+        btns.addWidget(delete)
+        btns.addWidget(groups)
 
-    def set_classes(self, names):
-        current = self.current_class()
-        self.list_widget.clear()
-        self.list_widget.addItems(names)
-        if names:
-            row = names.index(current) if current in names else 0
-            self.list_widget.setCurrentRow(row)
-        else:
-            self.list_widget.setCurrentRow(-1)
-
-    def current_class(self):
-        return self.list_widget.currentItem().text() if self.list_widget.currentItem() else 'object'
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Classes"))
+        layout.addLayout(row)
+        layout.addWidget(self.list)
+        layout.addLayout(btns)
 
     def _add(self):
-        name, ok = QInputDialog.getText(self, 'Add Class', 'Class name:')
-        if ok and name.strip():
-            self.classAdded.emit(name.strip())
+        name = self.input.text().strip()
+        if name:
+            self.classAdded.emit(name)
+            self.input.clear()
 
     def _delete(self):
-        item = self.list_widget.currentItem()
+        item = self.list.currentItem()
         if item:
             self.classDeleted.emit(item.text())
+
+    def set_classes(self, classes):
+        current = self.list.currentItem().text() if self.list.currentItem() else None
+        self.list.clear()
+        self.list.addItems(list(classes))
+        if current:
+            matches = self.list.findItems(current, 0)
+            if matches:
+                self.list.setCurrentItem(matches[0])

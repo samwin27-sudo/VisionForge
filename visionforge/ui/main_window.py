@@ -1,8 +1,27 @@
+from __future__ import annotations
+
 from pathlib import Path
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QKeySequence, QShortcut
-from PySide6.QtWidgets import QFileDialog, QLabel, QMainWindow, QMessageBox, QProgressDialog, QPushButton, QListWidget, QSplitter, QToolBar, QVBoxLayout, QWidget, QDialog, QDialog
+from PySide6.QtWidgets import (
+    QFileDialog,
+    QLabel,
+    QDialog,
+    QMainWindow,
+    QMessageBox,
+    QProgressDialog,
+    QPushButton,
+    QListWidget,
+    QSplitter,
+    QToolBar,
+    QVBoxLayout,
+    QWidget,
+)
+
 from visionforge.ai.ai_review import accept_all, reject_all, set_status
+from visionforge.ai.sam_segmenter import SamSegmenter, SamSettings
+from visionforge.ai.segmentation_backend import MissingSegmentationDependency
 from visionforge.ai.yolo_autolabeler import MissingYoloDependency, YoloAutoLabeler
 from visionforge.analysis.dataset_analyzer import analyze_project
 from visionforge.analysis.report_generator import generate_report
@@ -10,6 +29,7 @@ from visionforge.augment.augmentor import augment_project
 from visionforge.config import APP_NAME, PROJECT_FILE_NAME, VERSION
 from visionforge.core.annotation_store import Annotation, AnnotationStore
 from visionforge.core.dataset_loader import load_dataset
+from visionforge.core.mask_utils import mask_to_polygons
 from visionforge.core.project_io import load_project, save_project
 from visionforge.exporters.coco_exporter import export_coco
 from visionforge.exporters.csv_exporter import export_csv_summary
@@ -29,15 +49,17 @@ from visionforge.ui.segmentation_panel import SegmentationPanel
 from visionforge.ui.settings_dialog import SettingsDialog
 from visionforge.ui.split_dialog import SplitDialog
 
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} v{VERSION}")
-        self.resize(1450, 900)
+        self.resize(1450, 880)
         self.store = AnnotationStore()
         self.current_image_index = -1
         self.current_class_name = "object"
         self.selected_annotation_id = None
+        self._sam_warning_shown = False
         self._build_ui()
         self._build_toolbar()
         self._shortcuts()
@@ -47,9 +69,11 @@ class MainWindow(QMainWindow):
         self.dataset_panel = DatasetPanel()
         self.class_panel = ClassPanel()
         self.class_panel.classAdded.connect(self.add_class)
-        self.class_panel.classDeleted.connect(self.delete_class)
         self.class_panel.classSelected.connect(lambda n: setattr(self, "current_class_name", n or "object"))
         self.class_panel.groupingRequested.connect(self.open_group_manager)
+        if hasattr(self.class_panel, "classDeleted"):
+            self.class_panel.classDeleted.connect(self.delete_class)
+
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.addWidget(self.dataset_panel)
@@ -58,8 +82,10 @@ class MainWindow(QMainWindow):
         self.canvas = AnnotationCanvas()
         self.canvas.annotationCreated.connect(self.add_bbox_annotation)
         self.canvas.annotationSelected.connect(self._annotation_selected)
-        self.canvas.annotationChanged.connect(self.update_bbox_annotation)
-        self.canvas.deleteSelected.connect(self.delete_annotation_by_id)
+        if hasattr(self.canvas, "annotationChanged"):
+            self.canvas.annotationChanged.connect(self._annotation_changed)
+        if hasattr(self.canvas, "deleteRequested"):
+            self.canvas.deleteRequested.connect(self.delete_selected_annotation)
         self.dataset_panel.imageSelected.connect(self.load_image_index)
 
         self.annotation_list = QListWidget()
@@ -71,10 +97,12 @@ class MainWindow(QMainWindow):
         self.reject_btn.clicked.connect(lambda: self._set_selected_status("rejected"))
         self.accept_all_btn.clicked.connect(self._accept_all_current)
         self.reject_all_btn.clicked.connect(self._reject_all_current)
+
         self.segmentation_panel = SegmentationPanel()
         self.segmentation_panel.visibilityChanged.connect(self._toggle_masks)
         self.segmentation_panel.opacityChanged.connect(self._set_mask_opacity)
-        self.segmentation_panel.generateMaskRequested.connect(self._segmentation_not_configured)
+        self.segmentation_panel.generateMaskRequested.connect(self.generate_mask_for_selected_bbox)
+
         self.insights = InsightsPanel()
         right = QWidget()
         right_layout = QVBoxLayout(right)
@@ -98,13 +126,13 @@ class MainWindow(QMainWindow):
         actions = [
             ("Open Dataset", self.open_dataset),
             ("Save Project", self.save_project),
-            ("Auto Label", self.auto_label_current),
-            ("Segmentation Mode", self._segmentation_not_configured),
+            ("Auto Annotate", self.auto_annotate),
+            ("Auto Annotate Full Dataset", self.auto_label_full_dataset),
             ("Analyze Dataset", self.analyze_dataset),
             ("Augment Dataset", self.augment_dataset),
             ("Split Dataset", self.split_dataset),
             ("Export", self.export_dataset),
-            ("Quick Export", self.quick_export_dataset),
+            ("Quick Export", self.quick_export),
             ("Generate Report", self.generate_report),
             ("Settings", self.open_settings),
         ]
@@ -118,7 +146,7 @@ class MainWindow(QMainWindow):
             ("Ctrl+O", self.open_dataset),
             ("Ctrl+S", self.save_project),
             ("Ctrl+E", self.export_dataset),
-            ("Ctrl+Shift+E", self.quick_export_dataset),
+            ("Ctrl+Shift+E", self.quick_export),
             ("Ctrl+R", self.generate_report),
             ("Ctrl+A", self.auto_label_current),
             ("Ctrl+Shift+A", self.auto_label_full_dataset),
@@ -138,7 +166,11 @@ class MainWindow(QMainWindow):
 
     def _status(self, message):
         idx = self.current_image_index + 1 if self.current_image_index >= 0 else 0
-        self.statusBar().showMessage(f"{message} | Image {idx}/{len(self.store.images)} | Mode: detection | AI model: lazy-load")
+        self.statusBar().showMessage(f"{message} | Image {idx}/{len(self.store.images)} | Mode: detection/segmentation | AI: optional")
+
+    def _refresh_class_colors(self):
+        if hasattr(self.canvas, "set_class_colors"):
+            self.canvas.set_class_colors(self.store.class_color_lookup())
 
     def open_dataset(self):
         folder = QFileDialog.getExistingDirectory(self, "Open Dataset Folder")
@@ -152,6 +184,7 @@ class MainWindow(QMainWindow):
                 self.store.add_class("object")
             self.dataset_panel.set_images([image.relative_path for image in self.store.images])
             self.class_panel.set_classes([c["name"] for c in self.store.project.classes])
+            self._refresh_class_colors()
             self.load_image_index(0 if self.store.images else -1)
             self._status(f"Loaded {len(self.store.images)} images")
         except Exception as exc:
@@ -171,6 +204,7 @@ class MainWindow(QMainWindow):
         self.current_image_index = index
         image = self.store.images[index]
         self.canvas.load_image(Path(self.store.project.dataset_path) / image.relative_path, image)
+        self._refresh_class_colors()
         self._refresh_annotation_list()
         self._status(image.relative_path)
 
@@ -185,62 +219,26 @@ class MainWindow(QMainWindow):
     def add_class(self, name):
         self.store.add_class(name)
         self.class_panel.set_classes([c["name"] for c in self.store.project.classes])
+        self._refresh_class_colors()
         self.save_project()
 
     def delete_class(self, name):
         if not name:
             return
-        if len(self.store.project.classes) <= 1:
-            QMessageBox.information(self, APP_NAME, "At least one class is required.")
+        ok = QMessageBox.question(
+            self,
+            APP_NAME,
+            f"Delete class '{name}'?\n\nAnnotations using this class will also be removed.",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if ok != QMessageBox.Yes:
             return
-
-        used_count = sum(1 for _, ann in self.store.all_annotations() if ann.class_name == name)
-        if used_count:
-            reply = QMessageBox.question(
-                self,
-                APP_NAME,
-                f"Class '{name}' is used by {used_count} annotation(s).\n\nDelete this class and remove those annotations?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
-            if reply != QMessageBox.Yes:
-                return
-            for image in self.store.images:
-                image.annotations = [ann for ann in image.annotations if ann.class_name != name]
-        else:
-            reply = QMessageBox.question(
-                self,
-                APP_NAME,
-                f"Delete class '{name}'?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
-            if reply != QMessageBox.Yes:
-                return
-
-        self.store.project.classes = [c for c in self.store.project.classes if c["name"] != name]
-        for new_id, cls in enumerate(self.store.project.classes):
-            cls["id"] = new_id
-
-        id_by_name = {c["name"]: int(c["id"]) for c in self.store.project.classes}
-        for _, ann in self.store.all_annotations():
-            if ann.class_name in id_by_name:
-                ann.class_id = id_by_name[ann.class_name]
-
-        self.store.project.class_groups = {
-            group: [cls for cls in classes if cls != name]
-            for group, classes in self.store.project.class_groups.items()
-        }
-        self.store.project.class_groups = {g: c for g, c in self.store.project.class_groups.items() if c}
-
-        self.current_class_name = self.store.project.classes[0]["name"] if self.store.project.classes else "object"
+        self.store.delete_class(name, remove_annotations=True)
         self.class_panel.set_classes([c["name"] for c in self.store.project.classes])
-        self.selected_annotation_id = None
-        self.canvas.selected_annotation_id = None
+        self._refresh_class_colors()
         self.save_project()
         self._refresh_annotation_list()
         self.canvas.update()
-        self._status(f"Deleted class {name}")
 
     def add_bbox_annotation(self, bbox):
         if self.current_image_index < 0:
@@ -250,29 +248,22 @@ class MainWindow(QMainWindow):
         self.store.add_annotation(self.current_image_index, annotation)
         self.selected_annotation_id = annotation.annotation_id
         self.canvas.selected_annotation_id = annotation.annotation_id
+        self.class_panel.set_classes([c["name"] for c in self.store.project.classes])
+        self._refresh_class_colors()
         self.save_project()
         self._refresh_annotation_list()
         self.canvas.update()
-
-    def update_bbox_annotation(self, annotation_id, bbox):
-        if self.current_image_index < 0:
-            return
-        annotation = self.store.get_annotation(self.current_image_index, annotation_id)
-        if not annotation:
-            return
-        annotation.bbox = bbox
-        annotation.status = "edited" if annotation.source != "manual" else annotation.status
-        annotation.touch()
-        self.selected_annotation_id = annotation_id
-        self.canvas.selected_annotation_id = annotation_id
-        self.save_project()
-        self._refresh_annotation_list()
-        self._status("Updated bounding box")
 
     def _annotation_selected(self, annotation_id):
         self.selected_annotation_id = annotation_id
         self.canvas.selected_annotation_id = annotation_id
         self._refresh_annotation_list()
+
+    def _annotation_changed(self, annotation_id):
+        self.selected_annotation_id = annotation_id
+        self.save_project()
+        self._refresh_annotation_list()
+        self.canvas.update()
 
     def _refresh_annotation_list(self):
         self.annotation_list.clear()
@@ -313,11 +304,6 @@ class MainWindow(QMainWindow):
             self.canvas.update()
             self._status(f"Rejected {count} predictions")
 
-    def delete_annotation_by_id(self, annotation_id):
-        self.selected_annotation_id = annotation_id
-        self.canvas.selected_annotation_id = annotation_id
-        self.delete_selected_annotation()
-
     def delete_selected_annotation(self):
         if self.current_image_index >= 0 and self.selected_annotation_id:
             self.store.delete_annotation(self.current_image_index, self.selected_annotation_id)
@@ -327,51 +313,134 @@ class MainWindow(QMainWindow):
             self._refresh_annotation_list()
             self.canvas.update()
 
+    def auto_annotate(self):
+        if not self.store.images:
+            QMessageBox.information(self, APP_NAME, "Open a dataset first.")
+            return
+        dialog = AutoLabelDialog(self, default_scope="current")
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._apply_autolabel_dialog(dialog)
+
     def auto_label_current(self):
         if self.current_image_index < 0:
             QMessageBox.information(self, APP_NAME, "Open a dataset and select an image first.")
             return
-        dialog = AutoLabelDialog(self)
+        dialog = AutoLabelDialog(self, default_scope="current")
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self._run_yolo_on_indices([self.current_image_index], dialog.settings())
+            dialog.scope.setCurrentIndex(0)
+            self._apply_autolabel_dialog(dialog)
 
     def auto_label_full_dataset(self):
         if not self.store.images:
             QMessageBox.information(self, APP_NAME, "Open a dataset first.")
             return
-        dialog = AutoLabelDialog(self)
+        dialog = AutoLabelDialog(self, default_scope="dataset")
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self._run_yolo_on_indices(list(range(len(self.store.images))), dialog.settings())
+            dialog.scope.setCurrentIndex(1)
+            self._apply_autolabel_dialog(dialog)
 
-    def _run_yolo_on_indices(self, indices, settings):
+    def _apply_autolabel_dialog(self, dialog: AutoLabelDialog):
+        settings = dialog.settings()
+        mapping = dialog.class_mapping()
+        seg_options = dialog.segmentation_options()
+        saved_defaults = dialog.remember_defaults()
+        self.store.project.settings.setdefault("model_defaults", {}).update(saved_defaults)
+        self.store.project.settings["last_autolabel_mapping"] = dialog.mapping_text.toPlainText()
+        indices = [self.current_image_index] if dialog.selected_scope() == "current" else list(range(len(self.store.images)))
+        indices = [i for i in indices if i >= 0]
+        self._run_yolo_on_indices(indices, settings, mapping, seg_options)
+
+    def _build_sam_segmenter(self, seg_options):
+        if not seg_options.get("enabled"):
+            return None
+        checkpoint = seg_options.get("checkpoint_path") or self.store.project.settings.get("model_defaults", {}).get("default_segmentation_model", "")
+        if not checkpoint:
+            raise FileNotFoundError("Select a SAM checkpoint first, or set a default segmentation model.")
+        return SamSegmenter(SamSettings(checkpoint, seg_options.get("model_type", "auto"), seg_options.get("device", "auto")))
+
+    def _apply_segmentation_to_annotation(self, segmenter, image_path, annotation):
+        mask = segmenter.segment_from_box(image_path, annotation.bbox)
+        polygons = mask_to_polygons(mask)
+        if polygons:
+            # Use largest polygon by number of points. Good enough for v1.1.0.
+            annotation.polygon = max(polygons, key=len)
+            annotation.annotation_type = "polygon"
+            annotation.source = "yolo+sam" if annotation.source == "yolo" else annotation.source + "+sam"
+            annotation.touch()
+
+    def _run_yolo_on_indices(self, indices, settings, class_mapping=None, seg_options=None):
         try:
+            class_mapping = class_mapping or {}
             lookup = {c["name"]: int(c["id"]) for c in self.store.project.classes}
-            labeler = YoloAutoLabeler(settings)
-            progress = QProgressDialog("Running YOLO auto-labeling...", "Cancel", 0, len(indices), self)
+            labeler = YoloAutoLabeler(settings, class_mapping=class_mapping)
+            segmenter = None
+            if seg_options and seg_options.get("enabled"):
+                try:
+                    segmenter = self._build_sam_segmenter(seg_options)
+                except Exception as exc:
+                    if not seg_options.get("continue_if_fails", True):
+                        raise
+                    QMessageBox.warning(self, APP_NAME, f"Segmentation is unavailable. Continuing with YOLO boxes only.\n\n{exc}")
+                    segmenter = None
+
+            progress = QProgressDialog("Running auto annotation...", "Cancel", 0, len(indices), self)
+            progress.setMinimumWidth(520)
             total = 0
             for step, index in enumerate(indices, 1):
                 if progress.wasCanceled():
                     break
                 image = self.store.images[index]
-                annotations = labeler.predict_image(Path(self.store.project.dataset_path) / image.relative_path, lookup)
+                image_path = Path(self.store.project.dataset_path) / image.relative_path
+                annotations = labeler.predict_image(image_path, lookup)
                 for annotation in annotations:
-                    if self.store.get_class_by_name(annotation.class_name) is None:
-                        annotation.class_id = self.store.add_class(annotation.class_name)
+                    class_id = self.store.add_class(annotation.class_name)
+                    annotation.class_id = class_id
+                    if segmenter is not None and annotation.bbox:
+                        try:
+                            self._apply_segmentation_to_annotation(segmenter, image_path, annotation)
+                        except Exception as exc:
+                            if not seg_options.get("continue_if_fails", True):
+                                raise
+                            if not self._sam_warning_shown:
+                                QMessageBox.warning(self, APP_NAME, f"SAM failed on one or more boxes. Continuing with YOLO boxes only.\n\n{exc}")
+                                self._sam_warning_shown = True
                     self.store.add_annotation(index, annotation)
                 total += len(annotations)
                 progress.setValue(step)
             self.class_panel.set_classes([c["name"] for c in self.store.project.classes])
+            self._refresh_class_colors()
             self.save_project()
             self._refresh_annotation_list()
             self.canvas.update()
-            self._status(f"YOLO added {total} predictions")
+            self._status(f"Auto annotation added {total} predictions")
         except MissingYoloDependency as exc:
             QMessageBox.information(self, APP_NAME, str(exc))
+        except MissingSegmentationDependency as exc:
+            QMessageBox.information(self, APP_NAME, str(exc))
         except Exception as exc:
-            QMessageBox.warning(self, APP_NAME, f"Auto-labeling failed.\n\n{exc}")
+            QMessageBox.warning(self, APP_NAME, f"Auto annotation failed.\n\n{exc}")
 
-    def _segmentation_not_configured(self):
-        QMessageBox.information(self, APP_NAME, "Segmentation assistant is optional. Install with pip install -r requirements-segmentation.txt. The SAM backend is in visionforge/ai/sam_segmenter.py and mask/polygon utilities are ready for integration.")
+    def generate_mask_for_selected_bbox(self):
+        annotation = self._selected_annotation()
+        if not annotation or not annotation.bbox:
+            QMessageBox.information(self, APP_NAME, "Select a bounding box first.")
+            return
+        defaults = self.store.project.settings.get("model_defaults", {})
+        checkpoint = defaults.get("default_segmentation_model", "")
+        if not checkpoint:
+            QMessageBox.information(self, APP_NAME, "No default SAM model set. Open Auto Annotate → Segmentation and set a default SAM checkpoint.")
+            return
+        try:
+            image = self.store.images[self.current_image_index]
+            image_path = Path(self.store.project.dataset_path) / image.relative_path
+            segmenter = SamSegmenter(SamSettings(checkpoint, defaults.get("default_sam_model_type", "auto"), defaults.get("default_device", "auto")))
+            self._apply_segmentation_to_annotation(segmenter, image_path, annotation)
+            self.save_project()
+            self._refresh_annotation_list()
+            self.canvas.update()
+            self._status("Generated segmentation mask from selected box")
+        except Exception as exc:
+            QMessageBox.warning(self, APP_NAME, f"Segmentation failed.\n\n{exc}")
 
     def _toggle_masks(self, value):
         self.canvas.show_masks = value
@@ -385,97 +454,48 @@ class MainWindow(QMainWindow):
         self.insights.set_summary(analyze_project(self.store.project))
         self._status("Dataset analysis complete")
 
-    def export_dataset(self):
-        if not self.store.images:
-            QMessageBox.information(self, APP_NAME, "Open a dataset before exporting.")
+    def _perform_export(self, options):
+        if not options or not options.get("output"):
             return
+        output = Path(options["output"])
+        fmt = options["format"]
+        accepted_only = options.get("accepted_only", True)
+        if fmt == "YOLO TXT":
+            export_yolo(self.store.project, output / "yolo", accepted_only)
+        elif fmt == "Pascal VOC XML":
+            export_voc(self.store.project, output / "voc", accepted_only)
+        elif fmt == "COCO Detection JSON":
+            export_coco(self.store.project, output / "coco_detection.json", False, accepted_only)
+        elif fmt == "COCO Segmentation JSON":
+            export_coco(self.store.project, output / "coco_segmentation.json", True, accepted_only)
+        elif fmt == "CSV Summary":
+            export_csv_summary(self.store.project, output / "annotation_summary.csv", accepted_only)
+        elif fmt == "Grouped YOLO":
+            export_grouped(self.store.project, output, "yolo")
+        else:
+            raise ValueError(f"Unknown export format: {fmt}")
+        self.store.project.settings["last_export_options"] = options
+        self.save_project()
+        QMessageBox.information(self, APP_NAME, f"Export complete:\n{output}")
 
-        last_options = self.store.project.settings.get("last_export", {}) if self.store.project.settings else {}
-        dialog = ExportDialog(self, last_options)
+    def export_dataset(self):
+        dialog = ExportDialog(self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-
-        options = dialog.options()
-        if not options["output"]:
-            QMessageBox.information(self, APP_NAME, "Select an output folder before exporting.")
-            return
-
-        self._perform_export(options, show_success=True)
-
-    def quick_export_dataset(self):
-        if not self.store.images:
-            QMessageBox.information(self, APP_NAME, "Open a dataset before exporting.")
-            return
-
-        options = self.store.project.settings.get("last_export", {}) if self.store.project.settings else {}
-        if not options or not options.get("output") or not options.get("format"):
-            QMessageBox.information(self, APP_NAME, "No saved export settings yet. Choose Export once first.")
-            self.export_dataset()
-            return
-
-        output = options.get("output", "")
-        fmt = options.get("format", "")
-        accepted_only = options.get("accepted_only", True)
-        message = chr(10).join([
-            "Reuse last export settings?",
-            "",
-            f"Format: {fmt}",
-            f"Output: {output}",
-            f"Accepted only: {accepted_only}",
-        ])
-        reply = QMessageBox.question(
-            self,
-            APP_NAME,
-            message,
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes,
-        )
-        if reply != QMessageBox.Yes:
-            return
-
-        self._perform_export(options, show_success=True)
-
-    def _perform_export(self, options, show_success=True):
-        output = Path(options["output"])
         try:
-            fmt = options["format"]
-            accepted_only = bool(options.get("accepted_only", True))
-
-            if fmt == "YOLO TXT":
-                export_yolo(self.store.project, output / "yolo", accepted_only)
-            elif fmt == "Pascal VOC XML":
-                export_voc(self.store.project, output / "voc", accepted_only)
-            elif fmt == "COCO Detection JSON":
-                export_coco(self.store.project, output / "coco_detection.json", False, accepted_only)
-            elif fmt == "COCO Segmentation JSON":
-                export_coco(self.store.project, output / "coco_segmentation.json", True, accepted_only)
-            elif fmt == "CSV Summary":
-                export_csv_summary(self.store.project, output / "annotation_summary.csv", accepted_only)
-            elif fmt == "Grouped YOLO":
-                export_grouped(self.store.project, output, "yolo")
-            else:
-                QMessageBox.warning(self, APP_NAME, f"Unknown export format: {fmt}")
-                return
-
-            if options.get("remember", True):
-                self.store.project.settings["last_export"] = {
-                    "format": fmt,
-                    "output": str(output),
-                    "accepted_only": accepted_only,
-                }
-                self.save_project()
-
-            self._status(f"Exported {fmt}")
-            if show_success:
-                success = chr(10).join([
-                    "Export complete:",
-                    str(output),
-                    "",
-                    "Saved as last export settings. Use Quick Export next time.",
-                ])
-                QMessageBox.information(self, APP_NAME, success)
+            self._perform_export(dialog.options())
         except Exception as exc:
-            QMessageBox.warning(self, APP_NAME, "Export failed." + chr(10) + chr(10) + str(exc))
+            QMessageBox.warning(self, APP_NAME, f"Export failed.\n\n{exc}")
+
+    def quick_export(self):
+        options = self.store.project.settings.get("last_export_options")
+        if not options:
+            QMessageBox.information(self, APP_NAME, "No previous export settings found. Use Export once first.")
+            return
+        try:
+            self._perform_export(options)
+        except Exception as exc:
+            QMessageBox.warning(self, APP_NAME, f"Quick export failed.\n\n{exc}")
 
     def generate_report(self):
         folder = QFileDialog.getExistingDirectory(self, "Select report output folder")
@@ -499,8 +519,11 @@ class MainWindow(QMainWindow):
     def augment_dataset(self):
         dialog = AugmentationDialog(self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            augment_project(self.store.project, **dialog.options())
-            QMessageBox.information(self, APP_NAME, "Augmentation complete. Segmentation-safe augmentation is limited in v1.")
+            try:
+                augment_project(self.store.project, **dialog.options())
+                QMessageBox.information(self, APP_NAME, "Augmentation complete. Check the selected output folder.")
+            except Exception as exc:
+                QMessageBox.warning(self, APP_NAME, f"Augmentation failed.\n\n{exc}")
 
     def open_group_manager(self):
         dialog = ClassGroupDialog([c["name"] for c in self.store.project.classes], self.store.project.class_groups, self)
